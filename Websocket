@@ -1,0 +1,133 @@
+// WebSocket Server using 'ws' library
+// Install: npm install ws
+
+const WebSocket = require('ws');
+const http = require('http');
+
+// Create HTTP server
+const server = http.createServer();
+const wss = new WebSocket.Server({ server });
+
+// Store connected clients
+const clients = new Map();
+
+// Connection handler
+wss.on('connection', (ws, req) => {
+  const clientId = Date.now() + Math.random();
+  clients.set(clientId, ws);
+  
+  console.log(`Client ${clientId} connected. Total clients: ${clients.size}`);
+  
+  // Send welcome message
+  ws.send(JSON.stringify({
+    type: 'welcome',
+    clientId: clientId,
+    message: 'Connected to WebSocket server'
+  }));
+  
+  // Message handler
+  ws.on('message', (data) => {
+    try {
+      const message = JSON.parse(data);
+      console.log(`Received from ${clientId}:`, message);
+      
+      // Handle different message types
+      switch(message.type) {
+        case 'broadcast':
+          // Broadcast to all clients except sender
+          broadcast(message.data, clientId);
+          break;
+          
+        case 'ping':
+          // Respond with pong
+          ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+          break;
+          
+        case 'private':
+          // Send to specific client
+          sendToClient(message.targetId, message.data);
+          break;
+          
+        default:
+          // Echo back to sender
+          ws.send(JSON.stringify({
+            type: 'echo',
+            data: message
+          }));
+      }
+    } catch (err) {
+      console.error('Error parsing message:', err);
+      ws.send(JSON.stringify({ type: 'error', message: 'Invalid message format' }));
+    }
+  });
+  
+  // Error handler
+  ws.on('error', (error) => {
+    console.error(`Client ${clientId} error:`, error);
+  });
+  
+  // Close handler
+  ws.on('close', () => {
+    clients.delete(clientId);
+    console.log(`Client ${clientId} disconnected. Total clients: ${clients.size}`);
+    
+    // Notify other clients
+    broadcast({ type: 'user_left', clientId: clientId });
+  });
+});
+
+// Broadcast to all clients except sender
+function broadcast(data, excludeId = null) {
+  const message = JSON.stringify(data);
+  clients.forEach((client, id) => {
+    if (id !== excludeId && client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  });
+}
+
+// Send to specific client
+function sendToClient(clientId, data) {
+  const client = clients.get(clientId);
+  if (client && client.readyState === WebSocket.OPEN) {
+    client.send(JSON.stringify(data));
+  }
+}
+
+// Heartbeat to detect broken connections
+function heartbeat() {
+  this.isAlive = true;
+}
+
+// Ping all clients every 30 seconds
+const interval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on('close', () => {
+  clearInterval(interval);
+});
+
+// Start server
+const PORT = process.env.PORT || 8080;
+server.listen(PORT, () => {
+  console.log(`WebSocket server running on port ${PORT}`);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, closing server...');
+  wss.clients.forEach((client) => {
+    client.close();
+  });
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
