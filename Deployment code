@@ -1,0 +1,105 @@
+# .github/workflows/deploy.yml
+name: System Integration & Deployment Pipeline
+
+on:
+  push:
+    branches: [main, develop, staging]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Run unit tests
+        run: |
+          docker-compose -f docker-compose.test.yml up --abort-on-container-exit
+          docker-compose -f docker-compose.test.yml down
+
+      - name: Run integration tests
+        run: |
+          docker-compose -f docker-compose.integration.yml up --abort-on-container-exit
+          docker-compose -f docker-compose.integration.yml down
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to registry
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+  deploy-staging:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Deploy to Kubernetes staging
+        uses: azure/k8s-deploy@v4
+        with:
+          manifests: |
+            k8s/staging/deployment.yml
+            k8s/staging/service.yml
+            k8s/staging/ingress.yml
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Run smoke tests
+        run: |
+          curl -f https://staging.example.com/health || exit 1
+
+  deploy-production:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to Kubernetes production
+        uses: azure/k8s-deploy@v4
+        with:
+          manifests: |
+            k8s/production/deployment.yml
+            k8s/production/service.yml
+            k8s/production/ingress.yml
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          strategy: blue-green
+
+      - name: Run smoke tests
+        run: |
+          curl -f https://api.example.com/health || exit 1
+
+      - name: Notify team
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
