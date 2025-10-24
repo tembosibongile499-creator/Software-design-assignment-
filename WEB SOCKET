@@ -1,0 +1,96 @@
+import { Elysia } from 'elysia'
+import { t } from 'elysia'
+import { PrismaClient } from '@prisma/client'
+
+const prisma = new PrismaClient()
+const app = new Elysia()
+
+// Store connected WebSocket clients
+const wsClients = {
+  events: new Set<WebSocket>(),
+  rsvps: new Set<WebSocket>(),
+}
+
+// WebSocket setup
+app.ws('/ws', {
+  // Connection handler
+  open(ws) {
+    console.log('✅ New WebSocket connection')
+  },
+
+  // Listen for client messages (subscribe to channels)
+  message(ws, message) {
+    try {
+      const data = JSON.parse(message)
+      if (data.action === 'subscribe' && data.channel) {
+        const { channel } = data
+        if (wsClients[channel]) {
+          wsClients[channel].add(ws)
+          ws.send(JSON.stringify({ message: `Subscribed to ${channel}` }))
+        }
+      }
+    } catch (err) {
+      ws.send(JSON.stringify({ error: 'Invalid message format' }))
+    }
+  },
+
+  // Cleanup when socket closes
+  close(ws) {
+    for (const channel of Object.keys(wsClients)) {
+      wsClients[channel].delete(ws)
+    }
+    console.log('❌ WebSocket disconnected')
+  },
+})
+
+// Helper to broadcast updates to a specific channel
+function broadcast(channel: 'events' | 'rsvps', data: any) {
+  const message = JSON.stringify({ channel, data })
+  for (const ws of wsClients[channel]) {
+    ws.send(message)
+  }
+}
+
+// 📅 CRUD: Events
+app.post('/events', async ({ body }) => {
+  const event = await prisma.event.create({ data: body })
+  broadcast('events', { action: 'created', event })
+  return event
+})
+
+app.put('/events/:id', async ({ params, body }) => {
+  const event = await prisma.event.update({
+    where: { id: Number(params.id) },
+    data: body,
+  })
+  broadcast('events', { action: 'updated', event })
+  return event
+})
+
+app.delete('/events/:id', async ({ params }) => {
+  const event = await prisma.event.delete({
+    where: { id: Number(params.id) },
+  })
+  broadcast('events', { action: 'deleted', event })
+  return event
+})
+
+// ✅ RSVP management
+app.post('/rsvps', async ({ body }) => {
+  const rsvp = await prisma.rsvp.create({ data: body })
+  broadcast('rsvps', { action: 'added', rsvp })
+  return rsvp
+})
+
+app.put('/rsvps/:id', async ({ params, body }) => {
+  const rsvp = await prisma.rsvp.update({
+    where: { id: Number(params.id) },
+    data: body,
+  })
+  broadcast('rsvps', { action: 'updated', rsvp })
+  return rsvp
+})
+
+// Start the app
+app.listen(3000)
+console.log('🚀 Server running on http://localhost:3000')
